@@ -1,0 +1,57 @@
+{
+  "name": "dsh-bsl-lens",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BSL Lens — 1C:Enterprise (BSL) highlighting and navigation for the dsh document preview",
+  "keywords": [
+    "1c",
+    "bsl",
+    "1c-enterprise",
+    "dsh",
+    "dsh-plugin",
+    "syntax-highlighting",
+    "document-preview"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/askred-dot-ru/dsh-bsl-lens.git"
+  },
+  "homepage": "https://github.com/askred-dot-ru/dsh-bsl-lens#readme",
+  "bugs": {
+    "url": "https://github.com/askred-dot-ru/dsh-bsl-lens/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "index.js",
+    "bridge.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "docs/"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check bridge.js && node --check client.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24"
+  }
+}

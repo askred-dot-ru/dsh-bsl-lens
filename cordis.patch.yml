@@ -1,0 +1,19 @@
+# The BSL Lens bundle patch.
+#
+# One Host row and nothing else: the browser half is declared by `dsh.client` in
+# package.json, so the client module system picks it up from this row and serves
+# it under /plugins. Two optional config fields belong to the host bridge that
+# reads cross-module methods from cfsmcp2 — both may be omitted:
+#
+#   mcpPort  cfsmcp2 port, if it is not 8559 (`'host:port'` shorthand works)
+#   mcpHost  cfsmcp2 host, if it is not 127.0.0.1
+#   mcpUrl   the whole endpoint instead of host+port (wins over both)
+#   context  dump context a lookup falls back to (default p0)
+#
+# The renderer registers itself against the document preview registry
+# (`ctx.documentPreviews`) that `ui-sidebar-documentpreview` provides, so this
+# bundle needs that row to be mounted to appear. When it is absent the client
+# plugin simply never activates — the profile still boots.
+- insert:
+    - id: bsl-lens
+      name: 'dsh-bsl-lens'
