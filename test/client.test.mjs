@@ -100,20 +100,25 @@ const reactStub = {
  * @returns the factory's exports.
  */
 async function loadBundle() {
-  let definition;
+  const definitions = [];
   globalThis.window = {
     __ModuleLoader__: {
       load(value) {
-        definition = value;
+        definitions.push(value);
       },
     },
   };
   const source = await readFile(CLIENT, 'utf8');
   assert.match(source, /window\.__ModuleLoader__\.load\(/u, 'bundle must register through the loader facade');
   await import(`${CLIENT}?t=${String(Date.now())}`);
-  assert.ok(definition !== undefined, 'bundle called the loader');
-  assert.equal(definition.id, 'dsh-bsl-lens', 'the bundle id is the package name');
-  const exports = definition.factory((request) => {
+  assert.ok(definitions.length > 0, 'bundle called the loader');
+  const ids = definitions.map((entry) => entry.id);
+  assert.equal(ids[0], 'dsh-bsl-lens', 'the bundle id is the package name');
+  assert.deepEqual(ids.slice(1), ['@local/dsh-bsl-highlight'], 'and the pre-rename id keeps working');
+  for (const entry of definitions) {
+    assert.equal(typeof entry.factory, 'function', `factory for ${entry.id}`);
+  }
+  const exports = definitions[0].factory((request) => {
     if (request === 'react') return reactStub;
     if (request === '@deepseek-ai/dsh-client-ui-primitives') return {};
     throw new Error(`unexpected require(${JSON.stringify(request)})`);
