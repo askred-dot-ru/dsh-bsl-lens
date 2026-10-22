@@ -196,6 +196,32 @@ function methodPath(module, method) {
 }
 
 /**
+ * Pick a search hit that is the routine the page asked for.
+ *
+ * The page names the module the way the code spells it, and 1C code does not have
+ * to agree with the dump on case (`актив_Общий` in a module, `Актив_Общий` in the
+ * configuration). Matching lowercases both sides, so the canonical path from the
+ * index wins over the spelling.
+ *
+ * @param hits - `methods` from `find_methods`.
+ * @param module - the module as the code spells it.
+ * @param method - the routine name.
+ * @returns the hit, or null.
+ */
+export function pickMethod(hits, module, method) {
+  const wantedModule = module.toLowerCase();
+  const wantedMethod = method.toLowerCase();
+  for (const hit of Array.isArray(hits) ? hits : []) {
+    if (String(hit.name ?? '').toLowerCase() !== wantedMethod) continue;
+    const parent = String(hit.parent_path ?? hit.path ?? '').toLowerCase();
+    // `ОбщиеМодули.<модуль>` — this preview only reads common modules.
+    if (!parent.startsWith(`общиемодули.${wantedModule}`)) continue;
+    return hit;
+  }
+  return null;
+}
+
+/**
  * Resolve one routine and return what the preview needs.
  *
  * It asks `find_methods` first (scoped to the module) so the answer carries the
@@ -215,22 +241,24 @@ export async function resolveMethod(session, query) {
   let path = methodPath(module, method);
   let kind = null;
   let signature = null;
-  try {
-    const found = await session.call('find_methods', {
-      context,
-      query: method,
-      parent_path: `ОбщиеМодули.${module}`,
-      limit: 5,
-    });
-    const hits = Array.isArray(found) ? [] : (found.methods ?? []);
-    const exact = hits.find((hit) => String(hit.name ?? '').toLowerCase() === method.toLowerCase());
-    if (exact !== undefined) {
-      path = exact.path ?? path;
-      kind = exact.kind ?? null;
-      signature = exact.signature ?? null;
+  // First the scoped search (cheap, exact when the casing agrees), then a global
+  // exact-name scan filtered by module: that is what survives a case mismatch.
+  for (const scope of [`ОбщиеМодули.${module}`, null]) {
+    let hits = [];
+    try {
+      const answer = await session.call('find_methods', scope === null
+        ? { context, query: method, limit: 20 }
+        : { context, query: method, parent_path: scope, limit: 5 });
+      hits = Array.isArray(answer) ? [] : (answer.methods ?? []);
+    } catch (error) {
+      continue;
     }
-  } catch (error) {
-    // A search failure is not fatal: the direct path may still work.
+    const exact = pickMethod(hits, module, method);
+    if (exact === null) continue;
+    path = exact.path ?? path;
+    kind = exact.kind ?? null;
+    signature = exact.signature ?? null;
+    break;
   }
 
   let detail;

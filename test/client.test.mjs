@@ -1271,6 +1271,25 @@ test('following a reference in the dialog moves the cursor, and its back returns
   }
 });
 
+test('a module is matched to the dump regardless of letter case', async () => {
+  const { pickMethod } = await import('../bridge.js');
+
+  const hits = [
+    { name: 'ДатьСуммуВсегоПоНесколькимСФ', path: 'ОбщиеМодули.Актив_Общий.Методы.Module.ДатьСуммуВсегоПоНесколькимСФ', parent_path: 'ОбщиеМодули.Актив_Общий', kind: 'Function' },
+    { name: 'ДатьСуммуВсегоПоНесколькимСФ', path: 'Документы.СчетФактура.Методы.Form.ДатьСуммуВсегоПоНесколькимСФ', parent_path: 'Документы.СчетФактура.Формы.ФормаДокумента', kind: 'Function' },
+    { name: 'ДругоеИмя', path: 'ОбщиеМодули.Актив_Общий.Методы.Module.ДругоеИмя', parent_path: 'ОбщиеМодули.Актив_Общий' },
+  ];
+
+  const found = pickMethod(hits, 'актив_Общий', 'ДатьСуммуВсегоПоНесколькимСФ');
+  assert.equal(found?.parent_path, 'ОбщиеМодули.Актив_Общий', 'the spelling of the code finds the dump’s module');
+  assert.equal(pickMethod(hits, 'АКТИВ_ОБЩИЙ', 'ДатьСуммуВсегоПоНесколькимСФ')?.parent_path, 'ОбщиеМодули.Актив_Общий');
+  assert.equal(pickMethod(hits, 'актив_Общий', 'другоеимя')?.name, 'ДругоеИмя', 'the routine name is matched the same way');
+  assert.equal(pickMethod(hits, 'актив_Другой', 'ДатьСуммуВсегоПоНесколькимСФ'), null, 'a method of the right name in another module is not taken');
+  assert.equal(pickMethod(hits, 'актив_Общий', 'НетТакого'), null);
+  assert.equal(pickMethod([], 'актив_Общий', 'ДатьСуммуВсегоПоНесколькимСФ'), null);
+  assert.equal(pickMethod(null, 'актив_Общий', 'x'), null, 'no hits at all is not a crash');
+});
+
 test('the cfsmcp2 endpoint can be a port of your own', async () => {
   const { readConfig } = await import('../index.js');
 
