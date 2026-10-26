@@ -1271,6 +1271,255 @@ test('following a reference in the dialog moves the cursor, and its back returns
   }
 });
 
+test('find matches text, case and whole words the way an editor does', () => {
+  const { findMatches, tokenize, marksByLine, lineText } = bundle.__bsl;
+  const lines = tokenize([
+    'Процедура Тест()',        // 1
+    '\tПомощник();',            // 2
+    '\tПомощник(); Помощник();', // 3
+    '\tпомощник = 1;',          // 4
+    'КонецПроцедуры',           // 5
+  ].join('\n'));
+
+  assert.equal(lineText(lines[1]), '\tПомощник();');
+  const all = findMatches(lines, 'Помощник');
+  assert.deepEqual(all.map((hit) => [hit.line, hit.start]), [[2, 1], [3, 1], [3, 13], [4, 1]], 'every occurrence, both on line 3');
+  assert.equal(all.length, 4, 'case-insensitive by default, so the lower-case assignment matches too');
+  assert.equal(all[0].text, 'Помощник');
+
+  assert.equal(findMatches(lines, 'Помощник', { caseSensitive: true }).length, 3, 'the lower-case line drops out');
+  assert.equal(findMatches(lines, 'помощник', { caseSensitive: true }).length, 1);
+
+  assert.equal(findMatches(lines, '').length, 0, 'an empty query has no hits');
+  assert.equal(findMatches(lines, 'НетТакого').length, 0);
+
+  const word = findMatches(lines, 'Помощник', { wholeWord: true });
+  assert.deepEqual(word.map((hit) => hit.line), [2, 3, 3, 4], 'all four are whole words');
+  assert.equal(findMatches(lines, 'омощник', { wholeWord: true }).length, 0, 'a fragment inside a word is rejected');
+  const marks = marksByLine(all, 1);
+  assert.equal(marks.get(1), undefined, 'lines without hits have no marks');
+  assert.deepEqual(marks.get(3).map((mark) => mark.current), [true, false], 'the hit under the cursor is the current one');
+});
+
+test('a hit is wrapped in <mark> without losing the token colour', () => {
+  const { renderLine, tokenize, marksByLine, findMatches } = bundle.__bsl;
+  const lines = tokenize('\tПомощник();');
+  const hits = findMatches(lines, 'Помощник');
+  const marks = marksByLine(hits, 0);
+  const row = renderLine(lines[0], 1, undefined, marks.get(1));
+  const text = row.children[1];
+  const marksInRow = [];
+  const walk = (node) => {
+    if (node === null || node === undefined) return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (node.type === 'mark') marksInRow.push(node);
+    walk(node.children);
+  };
+  walk(text.children);
+  assert.equal(marksInRow.length, 1);
+  assert.equal(marksInRow[0].children[0], 'Помощник');
+  assert.equal(marksInRow[0].props.className, 'bslh-hit bslh-hit-cur', 'the current hit is the strong one');
+  assert.equal(marksInRow[0].props['data-hit'], 'current');
+});
+
+test('Ctrl+F opens the bar, stepping wraps, Esc closes it', async () => {
+  const seen = [];
+  bundle.apply({
+    effect: (fn) => fn(),
+    locale: { register: () => () => {}, bind: () => (key) => key },
+    documentPreviews: { register: () => () => {} },
+    slots: {
+      inject: (_name, register) => {
+        seen.push(register());
+        return () => {};
+      },
+      register: (spec, component) => ({ spec, component }),
+    },
+  });
+  const Body = seen[0].component;
+
+  hookHost = createHookHost();
+  try {
+    const props = {
+      content: {
+        kind: 'text',
+        text: ['Процедура Тест()', '\tПомощник();', '\tПомощник();', 'КонецПроцедуры'].join('\n'),
+        eof: true,
+      },
+      wrap: false,
+      scrollportRef: null,
+      t: (key, params) => (params === undefined ? key : `${key}:${JSON.stringify(params)}`),
+    };
+    const body = () => Body(props);
+    const bar = (rendered) => rendered.children[1];
+
+    let tree = hookHost.render(body);
+    assert.equal(bar(tree).type, 'div', 'no find bar before the shortcut');
+    tree.props.onKeyDown({ ctrlKey: true, key: 'f', preventDefault() {} });
+    tree = hookHost.render(body);
+    assert.equal(bar(tree).type, bundle.__bsl.FindBar, 'Ctrl+F opens the bar');
+    assert.equal(bar(tree).props.total, 0);
+    assert.equal(bar(tree).props.query, '');
+
+    bar(tree).props.onQuery('Помощник');
+    tree = hookHost.render(body);
+    assert.equal(bar(tree).props.total, 2, 'both calls are found');
+    assert.equal(bar(tree).props.index, 0);
+
+    bar(tree).props.onNext();
+    tree = hookHost.render(body);
+    assert.equal(bar(tree).props.index, 1);
+    bar(tree).props.onNext();
+    tree = hookHost.render(body);
+    assert.equal(bar(tree).props.index, 0, 'stepping wraps to the first hit');
+    bar(tree).props.onPrev();
+    tree = hookHost.render(body);
+    assert.equal(bar(tree).props.index, 1, 'and back to the last one');
+
+    // The page marks the current hit.
+    const scroll = tree.children[2];
+    const code = scroll.children[0].children[0];
+    const rows = [];
+    const walk = (node) => {
+      if (node === null || node === undefined) return;
+      if (Array.isArray(node)) {
+        node.forEach(walk);
+        return;
+      }
+      if (typeof node !== 'object') return;
+      if (node.type === 'mark') rows.push(node);
+      walk(node.children);
+    };
+    walk(code);
+    assert.equal(rows.length, 2, 'both hits are marked in the page');
+    assert.equal(rows.filter((mark) => mark.props['data-hit'] === 'current').length, 1, 'exactly one is current');
+
+    bar(tree).props.onClose();
+    tree = hookHost.render(body);
+    assert.notEqual(bar(tree).type, bundle.__bsl.FindBar, 'closing hides the bar');
+  } finally {
+    hookHost = null;
+  }
+});
+
+test('the find bar renders the counter, the switches and the hit list', () => {
+  const { FindBar } = bundle.__bsl;
+  const t = (key, params) => (params === undefined ? key : `${key}:${params.index}/${params.total}`);
+  const bar = FindBar({
+    inputRef: null,
+    query: 'Помощник',
+    index: 1,
+    total: 3,
+    caseSensitive: true,
+    wholeWord: true,
+    listOpen: true,
+    matches: [
+      { line: 2, start: 1, end: 9, text: 'Помощник', prefix: '\t', suffix: '();' },
+      { line: 3, start: 1, end: 9, text: 'Помощник', prefix: '\t', suffix: '();' },
+      { line: 9, start: 0, end: 8, text: 'Помощник', prefix: '', suffix: '()' },
+    ],
+    onQuery: () => {}, onPrev: () => {}, onNext: () => {}, onToggleCase: () => {},
+    onToggleWord: () => {}, onToggleList: () => {}, onJump: () => {}, onClose: () => {},
+    t,
+  });
+  const [icon, field, count, prev, next, caseButton, wordButton, listButton, close] = bar.children[0].children;
+  assert.equal(icon.children[0], '⌕');
+  assert.equal(field.type, 'input');
+  assert.equal(field.props.value, 'Помощник');
+  assert.equal(count.children[0], 'findCount:2/3', 'the counter says where the reader is');
+  assert.equal(prev.children[0], '↑');
+  assert.equal(next.children[0], '↓');
+  assert.equal(caseButton.props['data-active'], 'true');
+  assert.equal(caseButton.children[0], 'Aa');
+  assert.equal(wordButton.props['data-active'], 'true');
+  assert.equal(listButton.props['data-active'], 'true');
+  assert.equal(close.children[0], '×');
+  assert.equal(close.props['aria-label'], 'findClose');
+
+  const rows = bar.children[1].children;
+  assert.equal(rows.length, 3);
+  assert.equal(rows[1].props['data-active'], 'true', 'the current hit is highlighted in the list');
+  const snippet = rows[0].children[1];
+  assert.equal(snippet.children[0].children[0], '\t', 'the text before the hit');
+  assert.equal(snippet.children[1].children[0], 'Помощник', 'the hit itself');
+  assert.equal(snippet.children[2].children[0], '();', 'and the text after it');
+});
+
+test('the dialog filter finds routines by part of their name', async () => {
+  const seen = [];
+  bundle.apply({
+    effect: (fn) => fn(),
+    locale: { register: () => () => {}, bind: () => (key) => key },
+    documentPreviews: { register: () => () => {} },
+    slots: {
+      inject: (_name, register) => {
+        seen.push(register());
+        return () => {};
+      },
+      register: (spec, component) => ({ spec, component }),
+    },
+  });
+  const Body = seen[0].component;
+
+  hookHost = createHookHost();
+  try {
+    const props = {
+      content: {
+        kind: 'text',
+        text: ['Функция ДатьСуммуВсего()', 'КонецФункции', '', 'Функция ДатьТаблицу()', 'КонецФункции'].join('\n'),
+        eof: true,
+      },
+      wrap: false,
+      scrollportRef: null,
+      t: (key, params) => (params === undefined ? key : `${key}:${JSON.stringify(params)}`),
+    };
+    const body = () => Body(props);
+    const dialogOf = (rendered) => {
+      const slot = rendered.children[rendered.children.length - 1];
+      return Array.isArray(slot) ? (slot.find(Boolean) ?? null) : (slot ?? null);
+    };
+
+    let tree = hookHost.render(body);
+    tree.children[0].children[0].children[1].props.onClick();
+    tree = hookHost.render(body);
+    let dialog = dialogOf(tree);
+    assert.equal(dialog.type, bundle.__bsl.NavDialog);
+    assert.equal(dialog.props.filter.value, '', 'the filter starts empty');
+
+    dialog.props.filter.onChange('Дать');
+    tree = hookHost.render(body);
+    dialog = dialogOf(tree);
+    assert.equal(dialog.props.filter.count, 2, 'both «Дать…» routines match');
+    assert.equal(dialog.props.pane.props.key, 'hits', 'the pane shows the matching routines');
+    assert.equal(dialog.props.pane.props.symbols.length, 2);
+    assert.equal(dialog.props.preview.name, 'ДатьСуммуВсего', 'the preview follows the first match');
+
+    dialog.props.filter.onChange('Таблиц');
+    tree = hookHost.render(body);
+    dialog = dialogOf(tree);
+    assert.equal(dialog.props.filter.count, 1);
+    assert.equal(dialog.props.preview.name, 'ДатьТаблицу');
+
+    dialog.props.filter.onChange('НетТакого');
+    tree = hookHost.render(body);
+    dialog = dialogOf(tree);
+    assert.equal(dialog.props.filter.count, 0);
+    assert.equal(dialog.props.pane.children[0], 'filterNone');
+    assert.equal(dialog.props.goDisabled, true, '«Перейти» has nothing to jump to');
+
+    dialog.props.filter.onClear();
+    tree = hookHost.render(body);
+    dialog = dialogOf(tree);
+    assert.equal(dialog.props.filter.value, '');
+    assert.equal(dialog.props.pane.props.key, 'tree', 'clearing returns to the tab’s pane');
+  } finally {
+    hookHost = null;
+  }
+});
+
 test('a module is matched to the dump regardless of letter case', async () => {
   const { pickMethod } = await import('../bridge.js');
 
@@ -1449,7 +1698,11 @@ test('the body renders a code-preview pane the sidebar can size', () => {
   assert.equal(navButton.props['aria-expanded'], 'false');
   assert.equal(heading.children[2].props.className, 'bslh-lang', 'the nav button stands right after «Назад»');
   const actions = bar.children[1];
-  assert.equal(actions.children.length, 1, 'the toolbar keeps only «Copy» on the right');
+  const [findButton, copyButton] = actions.children;
+  assert.equal(actions.children.length, 2, 'the toolbar holds find and copy');
+  assert.equal(findButton.props['data-bsl-find'], true, 'the find button opens the bar');
+  assert.equal(findButton.props['aria-expanded'], 'false');
+  assert.equal(copyButton.props.className, 'bslh-copy');
   assert.equal(scroll.props.className, 'bslh-scroll');
   assert.equal(typeof scroll.props.ref, 'function', 'the body owns the pane scrollport');
 

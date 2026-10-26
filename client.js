@@ -551,6 +551,31 @@ function register(id) {
         '.bslh-ext-name{margin-left:8px;color:#5b2a86;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
         '.bslh-foot-note{align-self:center;color:#8a8a8a;font-size:11px}',
         '.bslh-pane-left:focus{outline:none}',
+        // ── Поиск по тексту ──
+        '.bslh-find{display:flex;flex-direction:column;flex:none;background:#f7f7f7;border-bottom:1px solid #dbdbdb;color-scheme:light}',
+        '.bslh-find-bar{display:flex;align-items:center;gap:6px;padding:6px 10px}',
+        '.bslh-find-icon{flex:none;color:#8a8a8a;font-size:14px;line-height:1}',
+        '.bslh-find-input{flex:1;min-width:0;height:24px;padding:0 8px;border:1px solid #b5b5b5;border-radius:4px;background:#ffffff;color:#000000;font:12px/22px var(--ds-font-family-code);outline:none}',
+        '.bslh-find-input:focus{border-color:#0b6bcb;box-shadow:0 0 0 1px #b9d4f2}',
+        '.bslh-find-count{flex:none;min-width:74px;color:#5c5c5c;font:11px/1 var(--ds-font-family-code);text-align:right;white-space:nowrap}',
+        '.bslh-find-btn{display:inline-flex;flex:none;align-items:center;justify-content:center;min-width:24px;height:24px;padding:0 6px;border:1px solid transparent;border-radius:4px;background:transparent;color:#3c3c3c;cursor:pointer;font:11px/1 var(--ds-font-family-code)}',
+        '.bslh-find-btn:hover:not(:disabled){background:#e4e4e4;color:#000000}',
+        '.bslh-find-btn:disabled{opacity:.4;cursor:default}',
+        '.bslh-find-btn:focus-visible{outline:1px solid #0b6bcb;outline-offset:1px}',
+        '.bslh-find-toggle[data-active=true]{border-color:#9dbfe4;background:#e3effd;color:#0b4f9c}',
+        '.bslh-find-word{padding:0 8px}',
+        '.bslh-find-rows{max-height:40vh;margin:0;padding:4px 0;list-style:none;overflow:auto;border-top:1px solid #e6e6e6;background:#ffffff}',
+        '.bslh-find-row{display:flex;align-items:baseline;gap:8px;padding:2px 12px;cursor:default;font:11px/1.5 var(--ds-font-family-code);white-space:pre}',
+        '.bslh-find-row:hover{background:#eef4fb}',
+        '.bslh-find-row[data-active=true]{background:#dce9f9}',
+        '.bslh-find-line{flex:none;min-width:3ch;color:#8a8a8a;text-align:right}',
+        '.bslh-find-snippet{overflow:hidden;text-overflow:ellipsis;color:#000000}',
+        '.bslh-hit{border-radius:2px;background:#ffe9a3;color:inherit;padding:0 1px}',
+        '.bslh-hit-cur{background:#ffb84d;box-shadow:0 0 0 1px #e08a1e}',
+        '.bslh-filter{display:flex;flex:none;align-items:center;gap:6px;margin:0 0 8px}',
+        '.bslh-filter-input{flex:1;min-width:0;height:22px;padding:0 8px;border:1px solid #b5b5b5;border-radius:4px;background:#ffffff;color:#000000;font:inherit;outline:none}',
+        '.bslh-filter-input:focus{border-color:#0b6bcb;box-shadow:0 0 0 1px #b9d4f2}',
+        '.bslh-filter-hits{margin:0 0 6px;color:#8a8a8a;font:11px/1.4 var(--dsw-font-family)}',
         '.bslh-tree{flex:1;min-width:0;min-height:0;margin:0;padding:2px 0;list-style:none;overflow:auto;background:#ffffff;border:1px solid #c9c9c9;outline:none}',
         '.bslh-tree:focus-visible{border-color:#0b6bcb}',
         // Faint vertical guides across the indent make the nesting readable; the
@@ -629,9 +654,141 @@ function register(id) {
        * @param hooks - optional `lookup(name)`/`go(symbol)` pair for references.
        * @returns the line element.
        */
-      function renderLine(spans, number, hooks) {
+      /**
+       * One source line as plain text.
+       *
+       * Spans cover the line completely (whitespace is a span too), so joining them
+       * reproduces the source exactly — which is what text search matches against.
+       *
+       * @param spans - the line's token spans.
+       * @returns the line's text.
+       */
+      function lineText(spans) {
+        let text = '';
+        for (const span of spans) text += span.s;
+        return text;
+      }
+
+      /** Whether a character can be part of an identifier (whole-word matching). */
+      function isWordChar(character) {
+        return character !== undefined && character !== '' && /[\p{L}\p{Nd}_]/u.test(character);
+      }
+
+      /**
+       * Occurrences of a query in a module, in source order.
+       *
+       * Matching is plain substring search, case-insensitive unless asked otherwise;
+       * the whole-word option requires the match not to sit inside a longer word.
+       * Overlapping matches are not produced — the scan advances past each hit.
+       *
+       * @param lines - token spans per source line.
+       * @param query - what the reader typed.
+       * @param options - `{ caseSensitive, wholeWord }`.
+       * @returns hits as `{ line, start, end }`, 1-based lines, 0-based columns.
+       */
+      function findMatches(lines, query, options = {}) {
+        if (typeof query !== 'string' || query === '') return [];
+        const caseSensitive = options.caseSensitive === true;
+        const wholeWord = options.wholeWord === true;
+        const needle = caseSensitive ? query : query.toLowerCase();
+        const hits = [];
+        for (let index = 0; index < lines.length; index += 1) {
+          const text = lineText(lines[index]);
+          const hay = caseSensitive ? text : text.toLowerCase();
+          let from = 0;
+          for (;;) {
+            const at = hay.indexOf(needle, from);
+            if (at < 0) break;
+            const before = at === 0 ? '' : text[at - 1];
+            const after = text[at + needle.length];
+            if (!wholeWord || (!isWordChar(before) && !isWordChar(after))) {
+              hits.push({ line: index + 1, start: at, end: at + needle.length, text: text.slice(at, at + needle.length) });
+            }
+            from = at + needle.length;
+          }
+        }
+        return hits;
+      }
+
+      /**
+       * Group hits by line for the renderer.
+       *
+       * @param matches - hits from {@link findMatches}.
+       * @param current - index of the hit the reader is on, or -1.
+       * @returns a map from 1-based line to `{ start, end, current }` ranges.
+       */
+      function marksByLine(matches, current) {
+        const byLine = new Map();
+        matches.forEach((hit, index) => {
+          const list = byLine.get(hit.line) ?? [];
+          list.push({ start: hit.start, end: hit.end, current: index === current });
+          byLine.set(hit.line, list);
+        });
+        return byLine;
+      }
+
+      /**
+       * Split one token's text into plain pieces and `<mark>` pieces.
+       *
+       * Only the part of a mark that falls inside this token is wrapped, so a match
+       * that spans several tokens is highlighted piecewise and keeps the token colours.
+       *
+       * @param text - the token's text.
+       * @param offset - the token's start column in the line.
+       * @param marks - the line's ranges.
+       * @param key - React key prefix for the marks.
+       * @returns nodes, or null when the token has no marks.
+       */
+      function splitMarks(text, offset, marks, key) {
+        if (marks === undefined || marks === null || marks.length === 0 || text === '') return null;
+        const end = offset + text.length;
+        const parts = [];
+        let cursor = offset;
+        for (const mark of marks) {
+          if (mark.end <= offset || mark.start >= end) continue;
+          const from = Math.max(mark.start, offset);
+          const to = Math.min(mark.end, end);
+          if (from > cursor) parts.push(text.slice(cursor - offset, from - offset));
+          parts.push(h('mark', {
+            key: `${key}:${from}`,
+            className: mark.current ? 'bslh-hit bslh-hit-cur' : 'bslh-hit',
+            'data-hit': mark.current ? 'current' : 'true',
+          }, text.slice(from - offset, to - offset)));
+          cursor = to;
+        }
+        if (parts.length === 0) return null;
+        if (cursor < end) parts.push(text.slice(cursor - offset));
+        return parts;
+      }
+
+      /**
+       * Paint one piece of text: plain when it has no marks, `<mark>`-wrapped when it
+       * does. A token keeps its colour either way.
+       */
+      function paintAt(text, offset, style, key, marks) {
+        const parts = splitMarks(text, offset, marks, key);
+        if (parts === null) return style === undefined ? text : h('span', { key, style }, text);
+        return h('span', { key, style }, parts);
+      }
+
+      /**
+       * Render one line: its gutter number and its painted runs. Plain runs stay
+       * bare strings so a line without tokens costs no extra elements.
+       *
+       * A bare call to a routine of this module becomes a framed reference, a call
+       * into another module becomes a violet one, and a search match is wrapped in
+       * `<mark>` without losing either — the pieces keep the token colour.
+       *
+       * @param spans - the line's token spans.
+       * @param number - 1-based source line number.
+       * @param hooks - optional `lookup(name)`/`go(symbol)`/`external` for references.
+       * @param marks - optional search ranges on this line, from {@link marksByLine}.
+       * @returns the line element.
+       */
+      function renderLine(spans, number, hooks, marks) {
         const children = [];
         let previous = null;
+        let column = 0;
         for (let index = 0; index < spans.length; index += 1) {
           const span = spans[index];
           const style = TOKEN_STYLE[span.t];
@@ -646,6 +803,9 @@ function register(id) {
               && hooks.external.lookup(span.s, called.s) !== undefined;
             if (external) {
               const request = { module: span.s, method: called.s };
+              const start = column;
+              const middle = start + span.s.length;
+              const finish = middle + dot.s.length;
               children.push(h('span', {
                 key: `ext:${index}`,
                 className: 'bslh-ext',
@@ -658,7 +818,12 @@ function register(id) {
                   if (hooks.external.lookup(span.s, called.s) === undefined) return;
                   hooks.external.open(request);
                 },
-              }, [span.s, dot.s, called.s]));
+              }, [
+                paintAt(span.s, start, undefined, `ext:${index}:0`, marks),
+                paintAt(dot.s, middle, undefined, `ext:${index}:1`, marks),
+                paintAt(called.s, finish, undefined, `ext:${index}:2`, marks),
+              ]));
+              column += span.s.length + dot.s.length + called.s.length;
               index += 2;
               previous = 'fn';
               continue;
@@ -686,11 +851,13 @@ function register(id) {
               'aria-label': target.name,
               onClick: reference,
               onKeyDown: reference,
-            }, span.s));
+            }, splitMarks(span.s, column, marks, `ref:${index}`) ?? span.s));
+            column += span.s.length;
             previous = span.t;
             continue;
           }
-          children.push(style === undefined ? span.s : h('span', { key: index, style }, span.s));
+          children.push(paintAt(span.s, column, style, index, marks));
+          column += span.s.length;
           // Whitespace never changes what the previous token was.
           if (span.t !== 'txt') previous = span.t === 'pun' ? span.s : span.t;
         }
@@ -1188,6 +1355,35 @@ function register(id) {
         ]);
       }
 
+      /** The search glyph: a magnifier, the same shape the Configurator uses. */
+      function findGlyph() {
+        return h('svg', {
+          viewBox: '0 0 16 16',
+          width: 15,
+          height: 15,
+          'aria-hidden': true,
+          focusable: 'false',
+        }, [
+          h('circle', {
+            key: 'lens',
+            cx: 7,
+            cy: 7,
+            r: 4.2,
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+          }),
+          h('path', {
+            key: 'handle',
+            d: 'M10.2 10.2 14 14',
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+          }),
+        ]);
+      }
+
       /** The call-tree glyph: a spine with three branches. */
       function treeGlyph() {
         return h('svg', {
@@ -1387,12 +1583,202 @@ function register(id) {
       }
 
       /**
+       * The find bar.
+       *
+       * A code page reader expects the editor's find: a field that searches as you
+       * type, a counter, step buttons that wrap, switches for case and whole word,
+       * and a list of matching lines to jump to. It sits under the toolbar, stays
+       * light, and owns Escape and Enter while open.
+       */
+      function FindBar({
+        inputRef, query, index, total, caseSensitive, wholeWord, listOpen, matches, partial,
+        onQuery, onPrev, onNext, onToggleCase, onToggleWord, onToggleList, onJump, onClose, t,
+      }) {
+        // The page loads large modules in chunks: while the rest is unloaded the
+        // counter says so instead of promising that nothing else matches.
+        const status = (query === ''
+          ? t('findHint')
+          : (total === 0 ? t('findNone') : t('findCount', { index: index + 1, total })))
+          + (partial === true && query !== '' ? ' …' : '');
+        const rows = matches.slice(0, 200).map((hit, position) => h('li', {
+          key: `${hit.line}:${hit.start}`,
+          className: 'bslh-find-row',
+          'data-active': position === index ? 'true' : 'false',
+          onClick: () => onJump(position),
+        }, [
+          h('span', { key: 'line', className: 'bslh-find-line' }, String(hit.line)),
+          h('span', { key: 'text', className: 'bslh-find-snippet' }, [
+            h('span', { key: 'before' }, hit.prefix),
+            h('mark', { key: 'hit', className: 'bslh-hit' }, hit.text),
+            h('span', { key: 'after' }, hit.suffix),
+          ]),
+        ]));
+        return h('div', { className: 'bslh-find', 'data-bsl-findbar': true }, [
+          h('div', { className: 'bslh-find-bar', key: 'bar' }, [
+            h('span', { key: 'icon', className: 'bslh-find-icon', 'aria-hidden': true }, '⌕'),
+            h('input', {
+              key: 'input',
+              ref: inputRef,
+              className: 'bslh-find-input',
+              type: 'text',
+              value: query,
+              placeholder: t('findPlaceholder'),
+              'aria-label': t('find'),
+              autoComplete: 'off',
+              spellCheck: false,
+              onInput: (event) => onQuery(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (event.shiftKey) onPrev();
+                  else onNext();
+                  return;
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onClose();
+                }
+              },
+            }),
+            h('span', {
+              key: 'count',
+              className: 'bslh-find-count',
+              'data-find-count': total,
+              'aria-live': 'polite',
+              title: partial === true ? t('findPartial') : undefined,
+            }, status),
+            h('button', {
+              key: 'prev',
+              type: 'button',
+              className: 'bslh-find-btn',
+              'aria-label': t('findPrev'),
+              title: t('findPrev'),
+              disabled: total === 0,
+              onClick: onPrev,
+            }, '↑'),
+            h('button', {
+              key: 'next',
+              type: 'button',
+              className: 'bslh-find-btn',
+              'aria-label': t('findNext'),
+              title: t('findNext'),
+              disabled: total === 0,
+              onClick: onNext,
+            }, '↓'),
+            h('button', {
+              key: 'case',
+              type: 'button',
+              className: 'bslh-find-btn bslh-find-toggle',
+              'data-active': caseSensitive ? 'true' : 'false',
+              'aria-pressed': caseSensitive ? 'true' : 'false',
+              'aria-label': t('findCase'),
+              title: t('findCase'),
+              onClick: onToggleCase,
+            }, 'Aa'),
+            h('button', {
+              key: 'word',
+              type: 'button',
+              className: 'bslh-find-btn bslh-find-toggle bslh-find-word',
+              'data-active': wholeWord ? 'true' : 'false',
+              'aria-pressed': wholeWord ? 'true' : 'false',
+              'aria-label': t('findWholeWord'),
+              title: t('findWholeWord'),
+              onClick: onToggleWord,
+            }, t('findWholeWord')),
+            h('button', {
+              key: 'list',
+              type: 'button',
+              className: 'bslh-find-btn',
+              'data-active': listOpen ? 'true' : 'false',
+              'aria-pressed': listOpen ? 'true' : 'false',
+              'aria-label': t('findList'),
+              title: t('findList'),
+              disabled: total === 0,
+              onClick: onToggleList,
+            }, '▾'),
+            h('button', {
+              key: 'close',
+              type: 'button',
+              className: 'bslh-find-btn',
+              'aria-label': t('findClose'),
+              title: t('findClose'),
+              onClick: onClose,
+            }, '×'),
+          ]),
+          listOpen && total > 0
+            ? h('ul', { className: 'bslh-find-rows', key: 'rows' }, rows)
+            : null,
+        ]);
+      }
+
+      /**
+       * The filter over the dialog's left pane: routines whose name contains the
+       * typed text. Tree rows keep their ancestors, so the hierarchy still reads.
+       */
+      function PaneFilter({ value, onChange, onClear, t }) {
+        return h('div', { className: 'bslh-filter' }, [
+          h('span', { key: 'icon', className: 'bslh-find-icon', 'aria-hidden': true }, '⌕'),
+          h('input', {
+            key: 'input',
+            className: 'bslh-filter-input',
+            type: 'text',
+            value,
+            placeholder: t('filterPlaceholder'),
+            'aria-label': t('filter'),
+            autoComplete: 'off',
+            spellCheck: false,
+            onInput: (event) => onChange(event.target.value),
+            onKeyDown: (event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                onClear();
+              }
+            },
+          }),
+          value === ''
+            ? null
+            : h('button', {
+              key: 'clear',
+              type: 'button',
+              className: 'bslh-find-btn',
+              'aria-label': t('filterClear'),
+              title: t('filterClear'),
+              onClick: onClear,
+            }, '×'),
+        ]);
+      }
+
+      /**
+       * A routine name with the filter fragment emphasised.
+       *
+       * @param name - the routine name.
+       * @param query - the filter text, or undefined.
+       * @returns the name, or nodes with one `<mark>`.
+       */
+      function highlightName(name, query) {
+        const needle = typeof query === 'string' ? query.trim().toLowerCase() : '';
+        if (needle === '') return name;
+        const at = name.toLowerCase().indexOf(needle);
+        if (at < 0) return name;
+        const head = name.slice(0, at);
+        const tail = name.slice(at + needle.length);
+        return [
+          head === '' ? null : head,
+          h('mark', { key: 'hit', className: 'bslh-hit' }, name.slice(at, at + needle.length)),
+          tail === '' ? null : tail,
+        ].filter((part) => part !== null);
+      }
+
+      /**
        * The flat list of routines: the «Список» tab's left pane.
        *
        * It is a listbox with a moving active row, so the pane keeps a single tab stop
        * and the arrow keys walk the rows.
        */
-      function SymbolsList({ symbols, activeIndex, onActivate, onGo, t }) {
+      function SymbolsList({ symbols, activeIndex, onActivate, onGo, highlight, t }) {
         const rows = symbols.map((symbol, index) => {
           const cells = [
             h('span', {
@@ -1401,7 +1787,7 @@ function register(id) {
               'data-kind': symbol.kind,
               'aria-hidden': true,
             }, symbol.kind === 'procedure' ? 'P' : 'F'),
-            h('span', { key: 'name', className: 'bslh-symbol-name' }, symbol.name),
+            h('span', { key: 'name', className: 'bslh-symbol-name' }, highlightName(symbol.name, highlight)),
           ];
           if (symbol.exported) cells.push(h('span', { key: 'export', className: 'bslh-symbol-export' }, t('exported')));
           cells.push(h('span', { key: 'line', className: 'bslh-symbol-line' }, String(symbol.line)));
@@ -1437,7 +1823,8 @@ function register(id) {
        */
       function NavDialog({
         tabs, tab, onTab, pane, preview, hooks, canBack, onBack, sorted, onToggleSort,
-        help, helpText, goDisabled, onGo, onCancel, onToggleHelp, onMove, onHorizontal, t,
+        help, helpText, goDisabled, onGo, onCancel, onToggleHelp, onMove, onHorizontal,
+        filter, t,
       }) {
         const paneRef = React.useRef(null);
         // The pane takes focus on open and on every tab switch, so the arrow keys
@@ -1532,7 +1919,19 @@ function register(id) {
             }, '×'),
           ]),
           h('div', { className: 'bslh-dialog-main', key: 'main' }, [
-            h('div', { className: 'bslh-pane-left', key: 'left', ref: paneRef, tabIndex: -1 }, pane),
+            h('div', { className: 'bslh-pane-left', key: 'left', ref: paneRef, tabIndex: -1 }, [
+            ...(filter === undefined ? [] : [h(PaneFilter, {
+              key: 'filter',
+              value: filter.value,
+              onChange: filter.onChange,
+              onClear: filter.onClear,
+              t,
+            })]),
+            ...(filter === undefined || filter.value.trim() === ''
+              ? []
+              : [h('p', { key: 'hits', className: 'bslh-filter-hits' }, t('filterHits', { count: filter.count }))]),
+            pane,
+          ]),
             // The pane remounts per routine, so its scrollbar starts at the top again.
             h(CodePreview, { key: `code:${preview === null || preview === undefined ? 'none' : preview.from}`, preview, hooks, canBack, onBack, t }),
           ]),
@@ -1574,6 +1973,8 @@ function register(id) {
        */
       function BslBody({ content, wrap, scrollportRef, t }) {
         const text = content !== undefined && content !== null && content.kind === 'text' ? content.text : '';
+        // The owner feeds a large file in chunks; `eof` says whether the tail is in.
+        const loadedAll = content === undefined || content === null || content.eof !== false;
         const lines = React.useMemo(() => tokenizeBsl(text), [text]);
         const analysis = React.useMemo(() => analyzeModule(lines), [lines]);
         const symbols = analysis.symbols;
@@ -1597,10 +1998,22 @@ function register(id) {
         // reference moves the cursor there; the trail keeps the tab and the selection
         // to come back to.
         const [navTrail, setNavTrail] = React.useState([]);
+        // Filter over routine names inside the dialog: its own query and cursor.
+        const [filterQuery, setFilterQuery] = React.useState('');
+        const [filterIndex, setFilterIndex] = React.useState(0);
         // A cross-module reference: the routine read through cfsmcp2, and the modules
         // a successful read has confirmed.
         const [external, setExternal] = React.useState(null);
         const [knownModules, setKnownModules] = React.useState(() => new Set());
+        // Find: the bar, its query, the hit the reader is on, and the two switches.
+        const [findOpen, setFindOpen] = React.useState(false);
+        const [findQuery, setFindQuery] = React.useState('');
+        const [findIndex, setFindIndex] = React.useState(0);
+        const [findCase, setFindCase] = React.useState(false);
+        const [findWord, setFindWord] = React.useState(false);
+        const [findList, setFindList] = React.useState(false);
+        const findInput = React.useRef(null);
+        const findOpener = React.useRef(null);
         const timer = React.useRef(null);
         const targetTimer = React.useRef(null);
         const targetRow = React.useRef(null);
@@ -1659,6 +2072,16 @@ function register(id) {
         }, []);
 
         const visible = React.useMemo(() => sortedSymbols(symbols, byName), [symbols, byName]);
+
+        /** Routines whose name contains the filter text, in module order. */
+        const filterHits = React.useMemo(() => {
+          const needle = filterQuery.trim().toLowerCase();
+          if (needle === '') return [];
+          return symbols.filter((symbol) => symbol.name.toLowerCase().includes(needle));
+        }, [filterQuery, symbols]);
+        const filterActive = filterQuery.trim() !== '';
+        const filterPosition = Math.min(filterIndex, Math.max(0, filterHits.length - 1));
+
 
         /**
          * The highlighted source of one routine, for the dialogs' right pane.
@@ -1751,6 +2174,8 @@ function register(id) {
 
         const openNav = React.useCallback(() => {
           rememberOpener();
+          setFilterQuery('');
+          setFilterIndex(0);
           setHelp(false);
           setNavTrail([]);
           // The form opens on «Вызывает» — the primary direction — and always on it,
@@ -1787,6 +2212,15 @@ function register(id) {
 
         const moveNav = React.useCallback((key) => {
           const step = { ArrowDown: 1, ArrowUp: -1, PageDown: 10, PageUp: -10 }[key];
+          if (filterActive) {
+            setFilterIndex((current) => {
+              const last = Math.max(0, filterHits.length - 1);
+              if (key === 'Home') return 0;
+              if (key === 'End') return last;
+              return Math.min(Math.max(0, current + (step ?? 0)), last);
+            });
+            return;
+          }
           if (navTab === 'list') {
             setActiveIndex((current) => {
               const last = Math.max(0, visible.length - 1);
@@ -1802,7 +2236,7 @@ function register(id) {
             if (key === 'End') return last;
             return Math.min(Math.max(0, current + (step ?? 0)), last);
           });
-        }, [navTab, treeRows.length, visible.length]);
+        }, [filterActive, filterHits.length, navTab, treeRows.length, visible.length]);
 
         const toggleRow = React.useCallback((key) => {
           setTreeExpanded((current) => {
@@ -1831,10 +2265,16 @@ function register(id) {
         }, [navTab, toggleRow, treePosition, treeRows]);
 
         const goNav = React.useCallback(() => {
+          if (filterActive) {
+            const picked = filterHits[filterPosition];
+            closeNav();
+            if (picked !== undefined) reveal(picked.line);
+            return;
+          }
           const symbol = navSymbol();
           closeNav();
           if (symbol !== undefined) reveal(symbol.line);
-        }, [closeNav, navSymbol, reveal]);
+        }, [closeNav, filterActive, filterHits, filterPosition, navSymbol, reveal]);
 
         const blocks = React.useMemo(() => segmentModule(lines, symbols), [lines, symbols]);
 
@@ -1876,6 +2316,99 @@ function register(id) {
           const node = scroller.current;
           if (node !== null) node.scrollTop = previous.scrollTop;
         }, [trail]);
+
+        /**
+         * Hits of the find bar, each with the snippet the list shows.
+         *
+         * The scan itself is {@link findMatches}; the snippet is cut around the hit
+         * so a results row reads like an editor's search list.
+         */
+        const findHits = React.useMemo(() => {
+          if (!findOpen || findQuery === '') return [];
+          const hits = findMatches(lines, findQuery, { caseSensitive: findCase, wholeWord: findWord });
+          const B = 48;
+          const A = 72;
+          return hits.map((hit) => {
+            const text = lineText(lines[hit.line - 1]);
+            return {
+              ...hit,
+              prefix: (hit.start > B ? '…' : '') + text.slice(Math.max(0, hit.start - B), hit.start),
+              suffix: text.slice(hit.end, hit.end + A) + (text.length > hit.end + A ? '…' : ''),
+            };
+          });
+        }, [findCase, findOpen, findQuery, findWord, lines]);
+        const findCurrent = findHits.length === 0 ? -1 : ((findIndex % findHits.length) + findHits.length) % findHits.length;
+        const findMarks = React.useMemo(
+          () => (findHits.length === 0 ? null : marksByLine(findHits, findCurrent)),
+          [findCurrent, findHits],
+        );
+
+        /** Open the find bar; the selection, if any, becomes the query. */
+        const openFind = React.useCallback(() => {
+          const active = typeof document === 'undefined' ? null : document.activeElement;
+          findOpener.current = active === null || active === undefined ? null : active;
+          let preselected = '';
+          if (typeof window !== 'undefined' && typeof window.getSelection === 'function') {
+            const selection = window.getSelection();
+            if (selection !== null && selection !== undefined && selection.isCollapsed === false) {
+              preselected = String(selection.toString() ?? '').trim().slice(0, 200);
+            }
+          }
+          if (preselected !== '') {
+            setFindQuery(preselected);
+            setFindIndex(0);
+          }
+          setFindOpen(true);
+        }, []);
+
+        const closeFind = React.useCallback(() => {
+          setFindOpen(false);
+          setFindList(false);
+          focusElement(findOpener.current);
+        }, []);
+
+        /** Step through hits with wrap-around; the counter shows where you are. */
+        const stepFind = React.useCallback((delta) => {
+          setFindIndex((current) => {
+            if (findHits.length === 0) return 0;
+            const next = current + delta;
+            if (next < 0) return findHits.length - 1;
+            if (next >= findHits.length) return 0;
+            return next;
+          });
+        }, [findHits.length]);
+
+        /** Put the caret into the field as soon as the bar appears. */
+        React.useEffect(() => {
+          if (!findOpen) return;
+          const input = findInput.current;
+          if (input !== null && input !== undefined && typeof input.focus === 'function') {
+            input.focus();
+            if (typeof input.select === 'function') input.select();
+          }
+        }, [findOpen]);
+
+        /**
+         * Bring the current hit into view: vertical centring plus the horizontal
+         * nudge a long line needs, on the pane's own scrollport.
+         */
+        React.useEffect(() => {
+          if (!findOpen || findCurrent < 0) return;
+          const node = scroller.current;
+          if (node === null || node === undefined) return;
+          const mark = node.querySelector('[data-hit=current]');
+          if (mark === null) return;
+          const box = node.getBoundingClientRect();
+          const row = mark.closest('[data-textpreview-line]') ?? mark;
+          const top = row.getBoundingClientRect().top - box.top;
+          if (top < 8 || top > node.clientHeight - 32) {
+            node.scrollTop += top - node.clientHeight / 2;
+          }
+          const left = mark.getBoundingClientRect().left - box.left;
+          if (left < 8 || left > node.clientWidth - 120) {
+            node.scrollLeft += left - node.clientWidth / 3;
+          }
+        }, [findCurrent, findHits, findOpen]);
 
         /**
          * Read a routine from another module through the host bridge.
@@ -1953,10 +2486,11 @@ function register(id) {
 
         /** What the right pane shows: the routine the active tab points at. */
         const navPreview = React.useMemo(() => {
+          if (filterActive) return previewOf(filterHits[filterPosition]);
           if (navTab === 'list') return previewOf(visible[activeIndex]);
           const row = treeRows[treePosition];
           return row === undefined ? null : previewOf(symbols[row.index]);
-        }, [activeIndex, navTab, previewOf, symbols, treePosition, treeRows, visible]);
+        }, [activeIndex, filterActive, filterHits, filterPosition, navTab, previewOf, symbols, treePosition, treeRows, visible]);
 
         /**
          * Follow a reference from the code pane: the picker moves onto that routine,
@@ -2006,7 +2540,31 @@ function register(id) {
           tabs: navTabs,
           tab: navTab,
           onTab: switchTab,
-          pane: navTab === 'list'
+          filter: {
+            value: filterQuery,
+            count: filterHits.length,
+            onChange: (value) => {
+              setFilterQuery(value);
+              setFilterIndex(0);
+            },
+            onClear: () => {
+              setFilterQuery('');
+              setFilterIndex(0);
+            },
+          },
+          pane: filterActive
+            ? (filterHits.length === 0
+              ? h('p', { className: 'bslh-status', key: 'none' }, t('filterNone'))
+              : h(SymbolsList, {
+                key: 'hits',
+                symbols: filterHits,
+                activeIndex: filterPosition,
+                onActivate: setFilterIndex,
+                onGo: goNav,
+                highlight: filterQuery,
+                t,
+              }))
+            : navTab === 'list'
             ? (visible.length === 0
               ? h('p', { className: 'bslh-status', key: 'empty' }, t('symbolsEmpty'))
               : h(SymbolsList, { key: 'list', symbols: visible, activeIndex, onActivate: setActiveIndex, onGo: goNav, t }))
@@ -2026,15 +2584,15 @@ function register(id) {
           canBack: navTrail.length > 0,
           onBack: navBack,
           sorted: byName,
-          onToggleSort: navTab === 'list' ? () => setByName(!byName) : undefined,
+          onToggleSort: navTab === 'list' && !filterActive ? () => setByName(!byName) : undefined,
           help,
           helpText: navTab === 'list' ? t('helpText') : t('treeHelpText'),
-          goDisabled: navTab === 'list' ? visible.length === 0 : treeRows.length === 0,
+          goDisabled: filterActive ? filterHits.length === 0 : (navTab === 'list' ? visible.length === 0 : treeRows.length === 0),
           onGo: goNav,
           onCancel: closeNav,
           onToggleHelp: () => setHelp(!help),
           onMove: moveNav,
-          onHorizontal: navTab === 'list' ? undefined : horizontalNav,
+          onHorizontal: navTab === 'list' || filterActive ? undefined : horizontalNav,
           t,
         }) : null;
 
@@ -2071,11 +2629,36 @@ function register(id) {
           return () => window.removeEventListener('keydown', onKey, true);
         }, [closeExternal, closeNav, external, navOpen]);
 
+        /**
+         * Page-level shortcuts: Ctrl/Cmd+F opens the bar, F3 and Ctrl/Cmd+G step,
+         * Shift reverses. While the bar's field has focus it owns Enter and Escape,
+         * so this handler only sees the shortcuts that start a search.
+         */
+        const onPageKeyDown = React.useCallback((event) => {
+          const meta = event.ctrlKey || event.metaKey;
+          const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+          if (meta && key === 'f') {
+            event.preventDefault();
+            openFind();
+            return;
+          }
+          if (event.key === 'F3') {
+            event.preventDefault();
+            stepFind(event.shiftKey ? -1 : 1);
+            return;
+          }
+          if (meta && key === 'g') {
+            event.preventDefault();
+            stepFind(event.shiftKey ? -1 : 1);
+          }
+        }, [openFind, stepFind]);
+
         const digits = String(lines.length).length;
         const style = { '--bslh-gutter': `${digits}ch` };
 
         return h('div', {
           className: 'bslh-root',
+          onKeyDown: onPageKeyDown,
           // The pane's layout rule keys on this attribute: it turns the shared
           // body wrapper into the flex column this inner scrollport needs, the
           // same contract the built-in code preview uses.
@@ -2107,6 +2690,18 @@ function register(id) {
               h('span', { className: 'bslh-meta', key: 'meta' }, text === '' ? '' : t('lines', { count: lines.length })),
             ]),
             h('div', { className: 'bslh-actions', key: 'actions' }, [
+              text === '' ? null : withTooltip(`${t('find')} · Ctrl+F`, h('button', {
+                type: 'button',
+                className: 'bslh-tool',
+                key: 'find',
+                'data-bsl-find': true,
+                'aria-label': t('find'),
+                'aria-expanded': findOpen ? 'true' : 'false',
+                onClick: () => {
+                  if (findOpen) closeFind();
+                  else openFind();
+                },
+              }, findGlyph())),
               text === '' ? null : h('button', {
                 type: 'button',
                 className: 'bslh-copy',
@@ -2116,10 +2711,54 @@ function register(id) {
               }),
             ]),
           ]),
-          h('div', { className: 'bslh-scroll', key: 'scroll', ref: attachScrollport }, text === ''
+          ...(findOpen ? [h(FindBar, {
+            key: 'find',
+            inputRef: findInput,
+            query: findQuery,
+            index: findCurrent,
+            total: findHits.length,
+            caseSensitive: findCase,
+            wholeWord: findWord,
+            listOpen: findList,
+            matches: findHits,
+            partial: loadedAll === false,
+            onQuery: (value) => {
+              setFindQuery(value);
+              setFindIndex(0);
+            },
+            onPrev: () => stepFind(-1),
+            onNext: () => stepFind(1),
+            onToggleCase: () => {
+              setFindCase((value) => !value);
+              setFindIndex(0);
+            },
+            onToggleWord: () => {
+              setFindWord((value) => !value);
+              setFindIndex(0);
+            },
+            onToggleList: () => setFindList((value) => !value),
+            onJump: (position) => setFindIndex(position),
+            onClose: closeFind,
+            t,
+          })] : []),
+          h('div', {
+            className: 'bslh-scroll',
+            key: 'scroll',
+            ref: attachScrollport,
+            tabIndex: 0,
+            // The code surface takes focus on a click, so Ctrl+F works right after
+            // the reader looks at the code instead of only after a button click.
+            onMouseDown: (event) => {
+              const node = event.currentTarget;
+              if (node !== null && node !== undefined && typeof node.focus === 'function') node.focus();
+            },
+          }, text === ''
             ? h('p', { className: 'bslh-empty' }, t('empty'))
             : h('pre', { className: 'bslh-pre' }, h('code', null, blocks.map((block, index) => {
-              const rows = block.spans.map((spans, offset) => renderLine(spans, block.from + offset + 1, referenceHooks));
+              const rows = block.spans.map((spans, offset) => {
+                const line = block.from + offset + 1;
+                return renderLine(spans, line, referenceHooks, findMarks === null ? undefined : findMarks.get(line));
+              });
               if (block.kind === 'plain') return rows;
               return h('div', {
                 key: `routine:${block.symbol.line}`,
@@ -2148,6 +2787,23 @@ function register(id) {
         nav: '方法和关系',
         navCount: '方法和关系（{count}）',
         tabList: '列表',
+        find: '查找',
+        findPlaceholder: '在模块中查找…',
+        findHint: '输入内容',
+        findNone: '未找到',
+        findPartial: '文件按部分加载：搜索仅限已加载部分',
+        findCount: '{index}/{total}',
+        findPrev: '上一个（Shift+Enter）',
+        findNext: '下一个（Enter）',
+        findCase: '区分大小写（Aa）',
+        findWholeWord: '全词',
+        findList: '匹配行',
+        findClose: '关闭查找（Esc）',
+        filter: '按名称筛选',
+        filterPlaceholder: '筛选…',
+        filterClear: '清除筛选',
+        filterHits: '找到：{count}',
+        filterNone: '没有匹配的方法',
         external: '来自 cfsmcp2 的方法',
         externalLoading: '正在从 cfsmcp2 读取方法…',
         externalEmpty: '未找到方法',
@@ -2187,6 +2843,23 @@ function register(id) {
         nav: 'Methods',
         navCount: 'Methods ({count})',
         tabList: 'List',
+        find: 'Find',
+        findPlaceholder: 'Find in module…',
+        findHint: 'Type to search',
+        findNone: 'No matches',
+        findPartial: 'The file loads in parts: the search covers the loaded part only',
+        findCount: '{index} of {total}',
+        findPrev: 'Previous match (Shift+Enter)',
+        findNext: 'Next match (Enter)',
+        findCase: 'Match case (Aa)',
+        findWholeWord: 'Word',
+        findList: 'Matching lines',
+        findClose: 'Close find (Esc)',
+        filter: 'Filter by name',
+        filterPlaceholder: 'Filter…',
+        filterClear: 'Clear filter',
+        filterHits: 'Matches: {count}',
+        filterNone: 'No routine matches',
         external: 'Method from cfsmcp2',
         externalLoading: 'Reading the method from cfsmcp2…',
         externalEmpty: 'The method was not found',
@@ -2226,6 +2899,23 @@ function register(id) {
         nav: 'Методы',
         navCount: 'Методы ({count})',
         tabList: 'Список',
+        find: 'Поиск',
+        findPlaceholder: 'Найти в модуле…',
+        findHint: 'Введите строку',
+        findNone: 'Не найдено',
+        findPartial: 'Файл загружается частями: поиск идёт по загруженной части',
+        findCount: '{index} из {total}',
+        findPrev: 'Предыдущее совпадение (Shift+Enter)',
+        findNext: 'Следующее совпадение (Enter)',
+        findCase: 'Учитывать регистр (Aa)',
+        findWholeWord: 'Слово',
+        findList: 'Строки с совпадениями',
+        findClose: 'Закрыть поиск (Esc)',
+        filter: 'Фильтр по имени',
+        filterPlaceholder: 'Фильтр…',
+        filterClear: 'Сбросить фильтр',
+        filterHits: 'Найдено методов: {count}',
+        filterNone: 'Нет методов с таким именем',
         external: 'Метод из cfsmcp2',
         externalLoading: 'Читаю метод в cfsmcp2…',
         externalEmpty: 'Метод не найден',
@@ -2279,7 +2969,7 @@ function register(id) {
           }, BslBody)), 'bsl-lens: preview body');
         },
         /** Test seam: the scanner and its palette, for the Node test suite. */
-        __bsl: { tokenize: tokenizeBsl, collectSymbols, analyzeModule, buildTreeRows, allTreeKeys, segmentModule, routineAt, commentOnlyLine, sortedSymbols, SymbolsList, NavDialog, ExternalDialog, looksLikeExternalModule, TreeView, CodePreview, BackButton, focusElement, TOKEN_STYLE, CONFIGURATOR, CSS, EXTENSIONS, ID },
+        __bsl: { tokenize: tokenizeBsl, collectSymbols, analyzeModule, buildTreeRows, allTreeKeys, segmentModule, routineAt, commentOnlyLine, sortedSymbols, SymbolsList, NavDialog, ExternalDialog, FindBar, PaneFilter, findMatches, marksByLine, lineText, splitMarks, renderLine, looksLikeExternalModule, TreeView, CodePreview, BackButton, focusElement, TOKEN_STYLE, CONFIGURATOR, CSS, EXTENSIONS, ID },
       };
     },
   });
