@@ -1429,6 +1429,7 @@ test('the find bar renders the counter, the switches and the hit list', () => {
   assert.equal(icon.children[0], '⌕');
   assert.equal(field.type, 'input');
   assert.equal(field.props.value, 'Помощник');
+  assert.equal(typeof field.props.onChange, 'function', 'a controlled field needs onChange, or React makes it read-only');
   assert.equal(count.children[0], 'findCount:2/3', 'the counter says where the reader is');
   assert.equal(prev.children[0], '↑');
   assert.equal(next.children[0], '↓');

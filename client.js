@@ -1626,7 +1626,9 @@ function register(id) {
               'aria-label': t('find'),
               autoComplete: 'off',
               spellCheck: false,
-              onInput: (event) => onQuery(event.target.value),
+              // `value` needs `onChange`: with only `onInput` React makes the field
+              // read-only, and typing into a search box is the whole point.
+              onChange: (event) => onQuery(event.target.value),
               onKeyDown: (event) => {
                 if (event.key === 'Enter') {
                   event.preventDefault();
@@ -1729,7 +1731,7 @@ function register(id) {
             'aria-label': t('filter'),
             autoComplete: 'off',
             spellCheck: false,
-            onInput: (event) => onChange(event.target.value),
+            onChange: (event) => onChange(event.target.value),
             onKeyDown: (event) => {
               if (event.key === 'Escape') {
                 event.preventDefault();
