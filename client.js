@@ -1384,6 +1384,26 @@ function register(id) {
         ]);
       }
 
+      /** The «go to line» glyph: a line-number grid, the editor's own shape. */
+      function gotoGlyph() {
+        return h('svg', {
+          viewBox: '0 0 16 16',
+          width: 15,
+          height: 15,
+          'aria-hidden': true,
+          focusable: 'false',
+        }, [
+          h('path', {
+            key: 'grid',
+            d: 'M2.5 2.5v11M6.5 2.5v11M1.5 6.2h13M1.5 9.8h13',
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 1.2,
+            strokeLinecap: 'round',
+          }),
+        ]);
+      }
+
       /** The call-tree glyph: a spine with three branches. */
       function treeGlyph() {
         return h('svg', {
@@ -1716,6 +1736,75 @@ function register(id) {
       }
 
       /**
+       * The «go to line» bar.
+       *
+       * A number field over the code, the way an editor's Ctrl+G works: type the
+       * line, press Enter, and the page jumps there and marks the row for a moment.
+       * It says which range is valid instead of silently doing nothing.
+       */
+      function GotoBar({ inputRef, value, lineCount, onValue, onGo, onClose, t }) {
+        const parsed = /^[0-9]+$/.test(value.trim()) ? Number(value.trim()) : null;
+        const valid = parsed !== null && parsed >= 1 && parsed <= lineCount;
+        const status = value.trim() === ''
+          ? t('gotoHint', { count: lineCount })
+          : (valid ? t('gotoReady', { line: parsed }) : t('gotoInvalid', { count: lineCount }));
+        return h('div', { className: 'bslh-find bslh-goto', 'data-bsl-gotobar': true }, [
+          h('div', { className: 'bslh-find-bar', key: 'bar' }, [
+            h('span', { key: 'icon', className: 'bslh-find-icon', 'aria-hidden': true }, '↹'),
+            h('input', {
+              key: 'input',
+              ref: inputRef,
+              className: 'bslh-find-input',
+              type: 'text',
+              inputMode: 'numeric',
+              value,
+              placeholder: t('gotoPlaceholder'),
+              'aria-label': t('goto'),
+              autoComplete: 'off',
+              spellCheck: false,
+              onChange: (event) => onValue(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onGo(value);
+                  return;
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onClose();
+                }
+              },
+            }),
+            h('span', {
+              key: 'status',
+              className: 'bslh-find-count',
+              'data-goto-count': valid ? parsed : '',
+              'aria-live': 'polite',
+            }, status),
+            h('button', {
+              key: 'go',
+              type: 'button',
+              className: 'bslh-find-btn bslh-find-word',
+              'aria-label': t('goto'),
+              title: t('goto'),
+              disabled: !valid,
+              onClick: () => onGo(value),
+            }, t('gotoGo')),
+            h('button', {
+              key: 'close',
+              type: 'button',
+              className: 'bslh-find-btn',
+              'aria-label': t('gotoClose'),
+              title: t('gotoClose'),
+              onClick: onClose,
+            }, '×'),
+          ]),
+        ]);
+      }
+
+      /**
        * The filter over the dialog's left pane: routines whose name contains the
        * typed text. Tree rows keep their ancestors, so the hierarchy still reads.
        */
@@ -2016,6 +2105,12 @@ function register(id) {
         const [findList, setFindList] = React.useState(false);
         const findInput = React.useRef(null);
         const findOpener = React.useRef(null);
+        // «Перейти к строке»: its own field, the number typed into it, and the
+        // element focus goes back to when it closes.
+        const [gotoOpen, setGotoOpen] = React.useState(false);
+        const [gotoValue, setGotoValue] = React.useState('');
+        const gotoInput = React.useRef(null);
+        const gotoOpener = React.useRef(null);
         const timer = React.useRef(null);
         const targetTimer = React.useRef(null);
         const targetRow = React.useRef(null);
@@ -2360,6 +2455,8 @@ function register(id) {
             setFindQuery(preselected);
             setFindIndex(0);
           }
+          // One field at a time: the search bar replaces the line field.
+          setGotoOpen(false);
           setFindOpen(true);
         }, []);
 
@@ -2368,6 +2465,46 @@ function register(id) {
           setFindList(false);
           focusElement(findOpener.current);
         }, []);
+
+        /** Open the line field, remembering where focus came from. */
+        const openGoto = React.useCallback(() => {
+          const active = typeof document === 'undefined' ? null : document.activeElement;
+          gotoOpener.current = active === null || active === undefined ? null : active;
+          // One field at a time: the line field replaces the search bar.
+          setFindOpen(false);
+          setGotoValue('');
+          setGotoOpen(true);
+        }, []);
+
+        const closeGoto = React.useCallback(() => {
+          setGotoOpen(false);
+          focusElement(gotoOpener.current);
+        }, []);
+
+        /**
+         * Jump to the typed line. A number outside the module is refused rather
+         * than clamped: silently landing on the last line hides a typo.
+         */
+        const submitGoto = React.useCallback((raw) => {
+          const text = typeof raw === 'string' ? raw.trim() : String(raw ?? '').trim();
+          if (!/^[0-9]+$/.test(text)) return;
+          const line = Number(text);
+          if (!Number.isFinite(line) || line < 1 || line > lines.length) return;
+          setGotoOpen(false);
+          reveal(line);
+          const node = scroller.current;
+          if (node !== null && node !== undefined && typeof node.focus === 'function') node.focus();
+        }, [lines.length, reveal]);
+
+        /** Put the caret into the line field as soon as it appears. */
+        React.useEffect(() => {
+          if (!gotoOpen) return;
+          const input = gotoInput.current;
+          if (input !== null && input !== undefined && typeof input.focus === 'function') {
+            input.focus();
+            if (typeof input.select === 'function') input.select();
+          }
+        }, [gotoOpen]);
 
         /** Step through hits with wrap-around; the counter shows where you are. */
         const stepFind = React.useCallback((delta) => {
@@ -2632,9 +2769,10 @@ function register(id) {
         }, [closeExternal, closeNav, external, navOpen]);
 
         /**
-         * Page-level shortcuts: Ctrl/Cmd+F opens the bar, F3 and Ctrl/Cmd+G step,
-         * Shift reverses. While the bar's field has focus it owns Enter and Escape,
-         * so this handler only sees the shortcuts that start a search.
+         * Page-level shortcuts: Ctrl/Cmd+F opens the search, Ctrl/Cmd+G the line
+         * field, F3 and Shift+F3 step through matches. While a field has focus it
+         * owns Enter and Escape, so this handler only sees the shortcuts that open
+         * one of the two bars.
          */
         const onPageKeyDown = React.useCallback((event) => {
           const meta = event.ctrlKey || event.metaKey;
@@ -2651,9 +2789,9 @@ function register(id) {
           }
           if (meta && key === 'g') {
             event.preventDefault();
-            stepFind(event.shiftKey ? -1 : 1);
+            openGoto();
           }
-        }, [openFind, stepFind]);
+        }, [openFind, openGoto, stepFind]);
 
         const digits = String(lines.length).length;
         const style = { '--bslh-gutter': `${digits}ch` };
@@ -2704,6 +2842,18 @@ function register(id) {
                   else openFind();
                 },
               }, findGlyph())),
+              text === '' ? null : withTooltip(`${t('goto')} · Ctrl+G`, h('button', {
+                type: 'button',
+                className: 'bslh-tool',
+                key: 'goto',
+                'data-bsl-goto': true,
+                'aria-label': t('goto'),
+                'aria-expanded': gotoOpen ? 'true' : 'false',
+                onClick: () => {
+                  if (gotoOpen) closeGoto();
+                  else openGoto();
+                },
+              }, gotoGlyph())),
               text === '' ? null : h('button', {
                 type: 'button',
                 className: 'bslh-copy',
@@ -2713,6 +2863,16 @@ function register(id) {
               }),
             ]),
           ]),
+          ...(gotoOpen ? [h(GotoBar, {
+            key: 'goto',
+            inputRef: gotoInput,
+            value: gotoValue,
+            lineCount: lines.length,
+            onValue: setGotoValue,
+            onGo: submitGoto,
+            onClose: closeGoto,
+            t,
+          })] : []),
           ...(findOpen ? [h(FindBar, {
             key: 'find',
             inputRef: findInput,
@@ -2804,6 +2964,13 @@ function register(id) {
         filter: '按名称筛选',
         filterPlaceholder: '筛选…',
         filterClear: '清除筛选',
+        goto: '转到行',
+        gotoPlaceholder: '行号…',
+        gotoGo: '转到',
+        gotoHint: '第 1–{count} 行',
+        gotoReady: '第 {line} 行',
+        gotoInvalid: '请输入 1–{count} 之间的行号',
+        gotoClose: '关闭（Esc）',
         filterHits: '找到：{count}',
         filterNone: '没有匹配的方法',
         external: '来自 cfsmcp2 的方法',
@@ -2860,6 +3027,13 @@ function register(id) {
         filter: 'Filter by name',
         filterPlaceholder: 'Filter…',
         filterClear: 'Clear filter',
+        goto: 'Go to line',
+        gotoPlaceholder: 'Line number…',
+        gotoGo: 'Go',
+        gotoHint: 'line 1–{count}',
+        gotoReady: 'line {line}',
+        gotoInvalid: 'Enter a line between 1 and {count}',
+        gotoClose: 'Close (Esc)',
         filterHits: 'Matches: {count}',
         filterNone: 'No routine matches',
         external: 'Method from cfsmcp2',
@@ -2916,6 +3090,13 @@ function register(id) {
         filter: 'Фильтр по имени',
         filterPlaceholder: 'Фильтр…',
         filterClear: 'Сбросить фильтр',
+        goto: 'Перейти к строке',
+        gotoPlaceholder: 'Номер строки…',
+        gotoGo: 'Перейти',
+        gotoHint: 'строки 1–{count}',
+        gotoReady: 'строка {line}',
+        gotoInvalid: 'Номер от 1 до {count}',
+        gotoClose: 'Закрыть (Esc)',
         filterHits: 'Найдено методов: {count}',
         filterNone: 'Нет методов с таким именем',
         external: 'Метод из cfsmcp2',
@@ -2971,7 +3152,7 @@ function register(id) {
           }, BslBody)), 'bsl-lens: preview body');
         },
         /** Test seam: the scanner and its palette, for the Node test suite. */
-        __bsl: { tokenize: tokenizeBsl, collectSymbols, analyzeModule, buildTreeRows, allTreeKeys, segmentModule, routineAt, commentOnlyLine, sortedSymbols, SymbolsList, NavDialog, ExternalDialog, FindBar, PaneFilter, findMatches, marksByLine, lineText, splitMarks, renderLine, looksLikeExternalModule, TreeView, CodePreview, BackButton, focusElement, TOKEN_STYLE, CONFIGURATOR, CSS, EXTENSIONS, ID },
+        __bsl: { tokenize: tokenizeBsl, collectSymbols, analyzeModule, buildTreeRows, allTreeKeys, segmentModule, routineAt, commentOnlyLine, sortedSymbols, SymbolsList, NavDialog, ExternalDialog, FindBar, PaneFilter, GotoBar, findMatches, marksByLine, lineText, splitMarks, renderLine, looksLikeExternalModule, TreeView, CodePreview, BackButton, focusElement, TOKEN_STYLE, CONFIGURATOR, CSS, EXTENSIONS, ID },
       };
     },
   });

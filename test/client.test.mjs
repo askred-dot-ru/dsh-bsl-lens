@@ -1405,6 +1405,120 @@ test('Ctrl+F opens the bar, stepping wraps, Esc closes it', async () => {
   }
 });
 
+test('Ctrl+G opens the line field, and the jump lands where it was asked', async () => {
+  const seen = [];
+  bundle.apply({
+    effect: (fn) => fn(),
+    locale: { register: () => () => {}, bind: () => (key) => key },
+    documentPreviews: { register: () => () => {} },
+    slots: {
+      inject: (_name, register) => {
+        seen.push(register());
+        return () => {};
+      },
+      register: (spec, component) => ({ spec, component }),
+    },
+  });
+  const Body = seen[0].component;
+
+  hookHost = createHookHost();
+  try {
+    const props = {
+      content: { kind: 'text', text: ['Процедура Тест()', '\tПомощник();', 'КонецПроцедуры'].join('\n'), eof: true },
+      wrap: false,
+      scrollportRef: null,
+      t: (key, params) => (params === undefined ? key : `${key}:${JSON.stringify(params)}`),
+    };
+    const body = () => Body(props);
+    const gotoBar = (rendered) => rendered.children[1];
+
+    let tree = hookHost.render(body);
+    assert.notEqual(gotoBar(tree).type, bundle.__bsl.GotoBar, 'no line field before the shortcut');
+
+    tree.props.onKeyDown({ ctrlKey: true, key: 'g', preventDefault() {} });
+    tree = hookHost.render(body);
+    assert.equal(gotoBar(tree).type, bundle.__bsl.GotoBar, 'Ctrl+G opens the line field');
+    assert.equal(gotoBar(tree).props.value, '');
+    assert.equal(gotoBar(tree).props.lineCount, 3);
+
+    gotoBar(tree).props.onValue('2');
+    tree = hookHost.render(body);
+    assert.equal(gotoBar(tree).props.value, '2');
+
+    // A refused number keeps the field open, so the typo can be fixed.
+    gotoBar(tree).props.onGo('99');
+    tree = hookHost.render(body);
+    assert.equal(gotoBar(tree).type, bundle.__bsl.GotoBar, 'an out-of-range line does not jump');
+    gotoBar(tree).props.onGo('abc');
+    tree = hookHost.render(body);
+    assert.equal(gotoBar(tree).type, bundle.__bsl.GotoBar, 'nor does a non-number');
+
+    gotoBar(tree).props.onGo('2');
+    tree = hookHost.render(body);
+    assert.notEqual(gotoBar(tree).type, bundle.__bsl.GotoBar, 'a valid line closes the field');
+
+    tree.props.onKeyDown({ ctrlKey: true, key: 'g', preventDefault() {} });
+    tree = hookHost.render(body);
+    assert.equal(gotoBar(tree).type, bundle.__bsl.GotoBar, 'the shortcut opens it again');
+    gotoBar(tree).props.onClose();
+    tree = hookHost.render(body);
+    assert.notEqual(gotoBar(tree).type, bundle.__bsl.GotoBar, 'and Esc/× closes it');
+  } finally {
+    hookHost = null;
+  }
+});
+
+test('the line field says which range is valid and offers the jump', () => {
+  const { GotoBar } = bundle.__bsl;
+  const t = (key, params) => {
+    const table = {
+      gotoHint: 'строки 1–{count}',
+      gotoReady: 'строка {line}',
+      gotoInvalid: 'Номер от 1 до {count}',
+      gotoGo: 'Перейти',
+      gotoClose: 'Закрыть',
+      goto: 'Перейти к строке',
+      gotoPlaceholder: 'Номер строки…',
+    };
+    let out = table[key] ?? key;
+    if (params !== undefined) for (const [name, value] of Object.entries(params)) out = out.replace(`{${name}}`, String(value));
+    return out;
+  };
+  const calls = [];
+  const render = (value) => GotoBar({
+    inputRef: null,
+    value,
+    lineCount: 894,
+    onValue: () => {},
+    onGo: (raw) => calls.push(raw),
+    onClose: () => {},
+    t,
+  });
+  const bar = (value) => {
+    const node = render(value);
+    const [, field, status, go, close] = node.children[0].children;
+    return { field, status, go, close };
+  };
+
+  const empty = bar('');
+  assert.equal(empty.field.props.value, '');
+  assert.equal(empty.field.props.placeholder, 'Номер строки…');
+  assert.equal(empty.status.children[0], 'строки 1–894');
+  assert.equal(empty.go.props.disabled, true, 'nothing to jump to yet');
+
+  const valid = bar('42');
+  assert.equal(valid.status.children[0], 'строка 42');
+  assert.equal(valid.go.props.disabled, false);
+  assert.equal(valid.status.props['data-goto-count'], 42);
+  valid.go.props.onClick();
+  assert.deepEqual(calls, ['42'], 'the jump is handed the typed line');
+
+  assert.equal(bar('0').status.children[0], 'Номер от 1 до 894');
+  assert.equal(bar('895').status.children[0], 'Номер от 1 до 894');
+  assert.equal(bar('abc').status.children[0], 'Номер от 1 до 894');
+  assert.equal(bar('').close.props['aria-label'], 'Закрыть');
+});
+
 test('the find bar renders the counter, the switches and the hit list', () => {
   const { FindBar } = bundle.__bsl;
   const t = (key, params) => (params === undefined ? key : `${key}:${params.index}/${params.total}`);
@@ -1699,10 +1813,12 @@ test('the body renders a code-preview pane the sidebar can size', () => {
   assert.equal(navButton.props['aria-expanded'], 'false');
   assert.equal(heading.children[2].props.className, 'bslh-lang', 'the nav button stands right after «Назад»');
   const actions = bar.children[1];
-  const [findButton, copyButton] = actions.children;
-  assert.equal(actions.children.length, 2, 'the toolbar holds find and copy');
+  const [findButton, gotoButton, copyButton] = actions.children;
+  assert.equal(actions.children.length, 3, 'the toolbar holds find, go-to-line and copy');
   assert.equal(findButton.props['data-bsl-find'], true, 'the find button opens the bar');
   assert.equal(findButton.props['aria-expanded'], 'false');
+  assert.equal(gotoButton.props['data-bsl-goto'], true, 'the go-to-line button stands next to it');
+  assert.equal(gotoButton.props['aria-expanded'], 'false');
   assert.equal(copyButton.props.className, 'bslh-copy');
   assert.equal(scroll.props.className, 'bslh-scroll');
   assert.equal(typeof scroll.props.ref, 'function', 'the body owns the pane scrollport');
